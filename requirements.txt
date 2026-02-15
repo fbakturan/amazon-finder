@@ -1,3 +1,4 @@
 streamlit
 apify-client
 pandas
+requests

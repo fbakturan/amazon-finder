@@ -1,51 +1,73 @@
 import streamlit as st
 import pandas as pd
-from scraper import scrape_all_categories
+from typing import List
+from scraper import scrape_movers_and_shakers
 
-# IMPERATIVE API KEY as requested
+# Config
 APIFY_KEY = "apify_api_VCb1D6HbNGS4IfU1OC4e5asnqgHe3U1CLkg8"
+GEMINI_KEY = "AIzaSyBKZB4HEGIRbhSqXK6aRwRZwu3uddCOLL4"
 
-st.set_page_config(page_title="Amazon Fırsat Avcısı", layout="wide")
-st.title("Amazon Fırsat Avcısı")
+st.set_page_config(page_title="Amazon Movers & Shakers -> Trendyol Finder", layout="wide")
+st.title("Amazon Movers & Shakers → Trendyol Opportunity Finder")
 
 with st.sidebar:
     st.header("Ayarlar")
-    category = st.selectbox("Kategori Seç", ["Electronics", "Home & Kitchen", "Automotive", "All"])
-    max_items = st.number_input("Max Ürün (her kategori)", min_value=1, max_value=200, value=20)
-    test_mode = st.checkbox("Test Mode (sadece 1 ürün) - hızlı doğrulama")
+    movers_input = st.text_area("Movers & Shakers URL'leri (her satıra 1 URL)", value="https://www.amazon.com/gp/movers-and-shakers")
+    max_items = st.number_input("Max Ürün (toplam)", min_value=1, max_value=500, value=50)
+    test_mode = st.checkbox("Test Connection (sadece 1 ürün)")
 
-# Persistent logs container
+# Logs container persists messages
 logs = st.container()
 
 st.markdown("---")
-st.write("Hazır olduğunda taramayı başlatmak için butona basın.")
 
-if st.button("TARAMAYI BAŞLAT"):
+cols = st.columns([3,1])
+cols[0].write("Hazır olduğunda 'Scrape' ile başlatın. Test Connection bağlantıyı hızlıca kontrol eder.")
+
+if cols[1].button("Test Connection"):
     with logs:
-        st.info("Apify'a bağlanılıyor... Lütfen bekleyin (bazı koşullarda daha uzun sürebilir)")
-        # Prepare categories list
-        cats = [category] if category != "All" else ["Electronics", "Home & Kitchen", "Automotive"]
-        # Call scraper
-        result = scrape_all_categories(APIFY_KEY, cats, max_items=max_items, test_mode=test_mode)
-
-        # If scraper returned structured error
-        if isinstance(result, dict) and result.get("error"):
-            # Big red error box with exact message and run URL
-            st.error("HATA: Apify çağrısı başarısız oldu.")
-            st.markdown("**Detay:**")
-            st.code(result.get("message") or "Bilinmeyen hata")
-            run_url = result.get("run_url")
-            if run_url:
+        st.info("Test modunda Apify çağrısı yapılıyor (1 ürün)...")
+        movers = [u.strip() for u in movers_input.splitlines() if u.strip()]
+        res = scrape_movers_and_shakers(APIFY_KEY, movers, max_items=max_items, test_mode=True)
+        if isinstance(res, dict) and res.get("error"):
+            st.error("🚨 Apify Hatası")
+            st.code(res.get("message", "Bilinmeyen hata"))
+            if res.get("run_url"):
+                run_url = res.get("run_url")
                 st.markdown(f"**Apify Run URL:** [{run_url}]({run_url})")
-        # If results returned
-        elif isinstance(result, list):
-            st.success(f"✅ Toplam {len(result)} ürün bulundu (birleştirilmiş).")
-            try:
-                df = pd.DataFrame(result)
-                st.dataframe(df)
-                csv = df.to_csv(index=False)
-                st.download_button("CSV indir", data=csv, file_name="results.csv")
-            except Exception:
-                st.write(result)
         else:
-            st.warning("Bot çalıştı ama sonuç listesi beklenmedik formatta döndü.")
+            items = res.get("items") if isinstance(res, dict) else res
+            st.success(f"Bağlantı başarılı — {len(items)} ürün örneği alındı.")
+
+if st.button("Scrape"):
+    with logs:
+        st.info("Apify'a bağlanılıyor... Bu işlem zaman alabilir.")
+        movers = [u.strip() for u in movers_input.splitlines() if u.strip()]
+        res = scrape_movers_and_shakers(APIFY_KEY, movers, max_items=max_items, test_mode=test_mode)
+
+        # Error handling
+        if isinstance(res, dict) and res.get("error"):
+            st.error("🚨 Apify çağrısı başarısız oldu.")
+            st.code(res.get("message", "Bilinmeyen hata"))
+            if res.get("run_url"):
+                run_url = res.get("run_url")
+                st.markdown(f"**Apify Run URL:** [{run_url}]({run_url})")
+        else:
+            data = res if isinstance(res, dict) else {"items": res, "metrics": {}}
+            items: List[dict] = data.get("items", [])
+            metrics = data.get("metrics", {})
+
+            st.metric("Toplam Taranan", metrics.get("total_scraped", len(items)))
+            st.metric("Filtrelenen (Marka)", metrics.get("filtered_by_brand", 0))
+            st.metric("Potansiyel Fırsatlar", metrics.get("potential_opportunities", len(items)))
+
+            if items:
+                try:
+                    df = pd.DataFrame(items)
+                    st.dataframe(df)
+                    csv = df.to_csv(index=False)
+                    st.download_button("CSV indir", data=csv, file_name="movers_shakers.csv")
+                except Exception:
+                    st.write(items)
+            else:
+                st.warning("Hiç uygun ürün bulunamadı.")

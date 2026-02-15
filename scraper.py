@@ -1,40 +1,58 @@
 import time
 import requests
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-# apify/amazon-scraper actor (owner~actor)
+# Actor identifier per request
 ACTOR = "apify/amazon-scraper"
 
+# Brand blacklist (case-insensitive)
+BRAND_BLACKLIST = [
+    "samsung",
+    "apple",
+    "nike",
+    "sony",
+    "lg",
+    "microsoft",
+    "bose",
+    "adidas",
+    "google",
+    "hp",
+    "dell",
+    "lenovo",
+    "panasonic",
+    "canon",
+]
 
-def run_scraper(api_token: str,
-                search_query: Optional[str] = None,
-                asin: Optional[str] = None,
-                max_items: int = 10,
-                test_mode: bool = False) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+
+def _clean_price(raw: Optional[str]) -> Optional[float]:
+    if not raw:
+        return None
+    try:
+        s = str(raw).replace("$", "").replace(",", "").strip()
+        if s == "":
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+
+def _is_brand_blacklisted(title: str, brand: Optional[str]) -> bool:
+    hay = (title or "").lower()
+    if brand:
+        hay += " " + brand.lower()
+    for b in BRAND_BLACKLIST:
+        if b in hay:
+            return True
+    return False
+
+
+def run_apify_actor(api_token: str, input_data: Dict[str, Any], timeout_seconds: int = 120) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
     """
-    Runs the official apify/amazon-scraper actor and returns items or an error dict.
-
-    On success: returns a list of result objects.
-    On failure: returns {"error": True, "message": str(e), "run_url": ...}
+    Runs the configured Apify actor with given `input_data` and returns dataset items or error dict.
     """
     params = {"token": api_token}
     run_web_url = None
     try:
-        input_data: Dict[str, Any] = {}
-        # Aggressive settings: use Apify proxy with residential if available and solve captchas
-        input_data["proxyConfiguration"] = {"useApifyProxy": True, "apifyProxyGroups": ["RESIDENTIAL"]}
-        input_data["solveCaptchas"] = True
-        # Limit number of items for quick test
-        input_data["maxItems"] = 1 if test_mode else max_items
-
-        if search_query:
-            # many versions of the actor accept `queries` or `searchKeywords` — include common keys
-            input_data.setdefault("queries", [search_query])
-            input_data.setdefault("searchKeywords", [search_query])
-        if asin:
-            input_data.setdefault("asins", [asin])
-
-        # Start actor run
         url = f"https://api.apify.com/v2/acts/{ACTOR}/runs"
         resp = requests.post(url, params=params, json={"input": input_data}, timeout=60)
         resp.raise_for_status()
@@ -43,12 +61,11 @@ def run_scraper(api_token: str,
         run_id = run.get("data", {}).get("id") or run.get("id")
         run_web_url = run.get("data", {}).get("webUrl") or run.get("data", {}).get("web_url")
         if not run_web_url and run_id:
-            run_web_url = f"https://console.apify.com/actors/apify/amazon-scraper/runs/{run_id}"
+            run_web_url = f"https://console.apify.com/actors/{ACTOR}/runs/{run_id}"
 
         # Poll for completion
         poll_url = f"https://api.apify.com/v2/acts/{ACTOR}/runs/{run_id}"
         status = run.get("data", {}).get("status") or run.get("status")
-        timeout_seconds = 120
         waited = 0
         while status not in ("SUCCEEDED", "FAILED", "ABORTED", "STOPPED", "TIMED-OUT") and waited < timeout_seconds:
             time.sleep(2)
@@ -59,23 +76,18 @@ def run_scraper(api_token: str,
             status = run.get("data", {}).get("status") or run.get("status")
 
         if status != "SUCCEEDED":
-            # Try to get helpful failure message
             msg = run.get("data", {}).get("statusMessage") or run.get("data", {}).get("errorMessage") or f"Run finished with status: {status}"
             return {"error": True, "message": str(msg), "run_url": run_web_url}
 
         data = run.get("data", {})
-        # Try dataset first
         dataset_id = data.get("defaultDatasetId") or data.get("defaultDataset")
         if dataset_id:
             ds_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
             ds_params = {"token": api_token, "format": "json"}
-            if test_mode:
-                ds_params["limit"] = 1
             r = requests.get(ds_url, params=ds_params, timeout=30)
             r.raise_for_status()
             return r.json()
 
-        # Fallback to key-value store output record
         kv_id = data.get("defaultKeyValueStoreId")
         if kv_id:
             kv_url = f"https://api.apify.com/v2/key-value-stores/{kv_id}/records/output"
@@ -92,17 +104,82 @@ def run_scraper(api_token: str,
         return {"error": True, "message": str(e), "run_url": run_web_url}
 
 
-def scrape_all_categories(api_token: str, categories: List[str], max_items: int = 10, test_mode: bool = False) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
-    """Scrape multiple categories and aggregate results. Returns error dict if any run fails."""
-    aggregated: List[Dict[str, Any]] = []
-    for cat in categories:
-        res = run_scraper(api_token=api_token, search_query=cat, max_items=max_items, test_mode=test_mode)
-        if isinstance(res, dict) and res.get("error"):
-            return res
-        if isinstance(res, list):
-            aggregated.extend(res)
-    return aggregated
+def scrape_movers_and_shakers(api_token: str,
+                              movers_urls: List[str],
+                              max_items: int = 50,
+                              test_mode: bool = False) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+    """
+    Scrape provided Movers & Shakers URLs using the official actor, filter brands, clean prices.
+
+    Returns either an error dict {error: True, message: ..., run_url: ...} or
+    a dict: {"items": [...], "metrics": {...}}
+    """
+    # Build actor input according to requested aggressive settings
+    input_data: Dict[str, Any] = {}
+    input_data["categoryOrProductUrls"] = movers_urls
+    input_data["maxItems"] = 1 if test_mode else max_items
+    input_data["proxyConfiguration"] = {"useApifyProxy": True}
+    input_data["captchaSolver"] = True
+    input_data["scrapeProductDetails"] = False
+
+    # Run Apify actor
+    res = run_apify_actor(api_token, input_data)
+    if isinstance(res, dict) and res.get("error"):
+        return res
+
+    # Expecting list of items
+    raw_items: List[Dict[str, Any]] = res if isinstance(res, list) else []
+
+    cleaned: List[Dict[str, Any]] = []
+    filtered_out = 0
+    for it in raw_items:
+        title = it.get("title") or it.get("name") or ""
+        brand = it.get("brand") or it.get("manufacturer") or ""
+        asin = it.get("asin") or it.get("asin13") or it.get("asinCode")
+        price_raw = it.get("price") or it.get("buyboxPrice") or it.get("currentPrice")
+
+        if _is_brand_blacklisted(title, brand):
+            filtered_out += 1
+            continue
+
+        price = _clean_price(price_raw)
+
+        amazon_url = None
+        if asin:
+            amazon_url = f"https://www.amazon.com/dp/{asin}"
+        else:
+            amazon_url = it.get("url") or it.get("productUrl")
+
+        cleaned_item = {
+            "title": title,
+            "brand": brand,
+            "asin": asin,
+            "price": price,
+            "amazon_url": amazon_url,
+            "raw": it,
+        }
+        cleaned.append(cleaned_item)
+
+    metrics = {
+        "total_scraped": len(raw_items),
+        "filtered_by_brand": filtered_out,
+        "potential_opportunities": len(cleaned),
+    }
+
+    return {"items": cleaned, "metrics": metrics}
+
+
+# Placeholder for future Trendyol price check (to be implemented later)
+def check_trendyol_price(product_title: str) -> Optional[float]:
+    """Stub: return None for now. Implementation will query Trendyol later."""
+    return None
+
+
+# Placeholder for future visual similarity using Gemini
+def check_visual_similarity(amazon_img: str, trendyol_img: str, gemini_api_key: Optional[str] = None) -> Optional[float]:
+    """Stub: return None. Implementation will use Gemini later."""
+    return None
 
 
 if __name__ == "__main__":
-    print("This module provides `run_scraper` and `scrape_all_categories` functions.")
+    print("Module ready: provides scrape_movers_and_shakers(), check_trendyol_price(), check_visual_similarity().")
