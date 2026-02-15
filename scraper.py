@@ -3,7 +3,8 @@ import requests
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Actor identifier per request
-ACTOR = "apify/amazon-scraper"
+ACTOR_PRIMARY = "vdrmota/amazon-scraper"
+ACTOR_FALLBACK = "junglee/amazon-crawler"
 
 # Brand blacklist (case-insensitive)
 BRAND_BLACKLIST = [
@@ -46,62 +47,103 @@ def _is_brand_blacklisted(title: str, brand: Optional[str]) -> bool:
     return False
 
 
-def run_apify_actor(api_token: str, input_data: Dict[str, Any], timeout_seconds: int = 120) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
-    """
-    Runs the configured Apify actor with given `input_data` and returns dataset items or error dict.
+def _run_actor_once(api_token: str, actor_id: str, input_data: Dict[str, Any], timeout_seconds: int = 120) -> Dict[str, Any]:
+    """Run a single Apify actor and return a structured result dict.
+
+    Returns a dict with either:
+      - {"ok": True, "items": [...], "actor": actor_id}
+    or
+      - {"ok": False, "error": True, "message": ..., "actor": actor_id, "http_status": code, "raw_response": ...}
     """
     params = {"token": api_token}
     run_web_url = None
+    url = f"https://api.apify.com/v2/acts/{actor_id}/runs"
     try:
-        url = f"https://api.apify.com/v2/acts/{ACTOR}/runs"
         resp = requests.post(url, params=params, json={"input": input_data}, timeout=60)
-        resp.raise_for_status()
-        run = resp.json()
-
-        run_id = run.get("data", {}).get("id") or run.get("id")
-        run_web_url = run.get("data", {}).get("webUrl") or run.get("data", {}).get("web_url")
-        if not run_web_url and run_id:
-            run_web_url = f"https://console.apify.com/actors/{ACTOR}/runs/{run_id}"
-
-        # Poll for completion
-        poll_url = f"https://api.apify.com/v2/acts/{ACTOR}/runs/{run_id}"
-        status = run.get("data", {}).get("status") or run.get("status")
-        waited = 0
-        while status not in ("SUCCEEDED", "FAILED", "ABORTED", "STOPPED", "TIMED-OUT") and waited < timeout_seconds:
-            time.sleep(2)
-            waited += 2
-            rr = requests.get(poll_url, params=params, timeout=30)
-            rr.raise_for_status()
-            run = rr.json()
-            status = run.get("data", {}).get("status") or run.get("status")
-
-        if status != "SUCCEEDED":
-            msg = run.get("data", {}).get("statusMessage") or run.get("data", {}).get("errorMessage") or f"Run finished with status: {status}"
-            return {"error": True, "message": str(msg), "run_url": run_web_url}
-
-        data = run.get("data", {})
-        dataset_id = data.get("defaultDatasetId") or data.get("defaultDataset")
-        if dataset_id:
-            ds_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
-            ds_params = {"token": api_token, "format": "json"}
-            r = requests.get(ds_url, params=ds_params, timeout=30)
-            r.raise_for_status()
-            return r.json()
-
-        kv_id = data.get("defaultKeyValueStoreId")
-        if kv_id:
-            kv_url = f"https://api.apify.com/v2/key-value-stores/{kv_id}/records/output"
-            rr = requests.get(kv_url, params={"token": api_token}, timeout=30)
-            rr.raise_for_status()
-            try:
-                return rr.json()
-            except ValueError:
-                return rr.text
-
-        return {"error": True, "message": "No dataset or key-value store found in run output", "run_url": run_web_url}
-
     except Exception as e:
-        return {"error": True, "message": str(e), "run_url": run_web_url}
+        return {"ok": False, "error": True, "message": str(e), "actor": actor_id, "http_status": None, "raw_response": None}
+
+    # If non-200, return full response details so UI can show why
+    if resp.status_code >= 400:
+        raw = None
+        try:
+            raw = resp.json()
+        except Exception:
+            raw = resp.text
+        return {"ok": False, "error": True, "message": f"HTTP {resp.status_code}", "actor": actor_id, "http_status": resp.status_code, "raw_response": raw}
+
+    try:
+        run = resp.json()
+    except Exception as e:
+        return {"ok": False, "error": True, "message": f"Invalid JSON response: {e}", "actor": actor_id, "http_status": resp.status_code, "raw_response": resp.text}
+
+    run_id = run.get("data", {}).get("id") or run.get("id")
+    run_web_url = run.get("data", {}).get("webUrl") or run.get("data", {}).get("web_url")
+    if not run_web_url and run_id:
+        run_web_url = f"https://console.apify.com/actors/{actor_id}/runs/{run_id}"
+
+    # Poll for completion
+    poll_url = f"https://api.apify.com/v2/acts/{actor_id}/runs/{run_id}"
+    status = run.get("data", {}).get("status") or run.get("status")
+    waited = 0
+    while status not in ("SUCCEEDED", "FAILED", "ABORTED", "STOPPED", "TIMED-OUT") and waited < timeout_seconds:
+        time.sleep(2)
+        waited += 2
+        rr = requests.get(poll_url, params=params, timeout=30)
+        if rr.status_code >= 400:
+            raw = None
+            try:
+                raw = rr.json()
+            except Exception:
+                raw = rr.text
+            return {"ok": False, "error": True, "message": f"HTTP {rr.status_code} while polling", "actor": actor_id, "http_status": rr.status_code, "raw_response": raw}
+        rr.raise_for_status()
+        run = rr.json()
+        status = run.get("data", {}).get("status") or run.get("status")
+
+    if status != "SUCCEEDED":
+        msg = run.get("data", {}).get("statusMessage") or run.get("data", {}).get("errorMessage") or f"Run finished with status: {status}"
+        return {"ok": False, "error": True, "message": str(msg), "actor": actor_id, "run_url": run_web_url, "http_status": None, "raw_response": run}
+
+    data = run.get("data", {})
+    dataset_id = data.get("defaultDatasetId") or data.get("defaultDataset")
+    if dataset_id:
+        ds_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
+        ds_params = {"token": api_token, "format": "json"}
+        r = requests.get(ds_url, params=ds_params, timeout=30)
+        if r.status_code >= 400:
+            raw = None
+            try:
+                raw = r.json()
+            except Exception:
+                raw = r.text
+            return {"ok": False, "error": True, "message": f"HTTP {r.status_code} when fetching dataset", "actor": actor_id, "http_status": r.status_code, "raw_response": raw, "run_url": run_web_url}
+        r.raise_for_status()
+        try:
+            items = r.json()
+        except Exception:
+            items = []
+        return {"ok": True, "items": items, "actor": actor_id, "run_url": run_web_url}
+
+    kv_id = data.get("defaultKeyValueStoreId")
+    if kv_id:
+        kv_url = f"https://api.apify.com/v2/key-value-stores/{kv_id}/records/output"
+        rr = requests.get(kv_url, params={"token": api_token}, timeout=30)
+        if rr.status_code >= 400:
+            raw = None
+            try:
+                raw = rr.json()
+            except Exception:
+                raw = rr.text
+            return {"ok": False, "error": True, "message": f"HTTP {rr.status_code} when fetching key-value store", "actor": actor_id, "http_status": rr.status_code, "raw_response": raw, "run_url": run_web_url}
+        rr.raise_for_status()
+        try:
+            items = rr.json()
+        except Exception:
+            items = rr.text
+        return {"ok": True, "items": items, "actor": actor_id, "run_url": run_web_url}
+
+    return {"ok": False, "error": True, "message": "No dataset or key-value store found in run output", "actor": actor_id, "run_url": run_web_url}
 
 
 def scrape_movers_and_shakers(api_token: str,
@@ -114,21 +156,47 @@ def scrape_movers_and_shakers(api_token: str,
     Returns either an error dict {error: True, message: ..., run_url: ...} or
     a dict: {"items": [...], "metrics": {...}}
     """
-    # Build actor input according to requested aggressive settings
-    input_data: Dict[str, Any] = {}
-    input_data["categoryOrProductUrls"] = movers_urls
-    input_data["maxItems"] = 1 if test_mode else max_items
-    input_data["proxyConfiguration"] = {"useApifyProxy": True}
-    input_data["captchaSolver"] = True
-    input_data["scrapeProductDetails"] = False
+    # Try primary actor first, then fallback
+    attempts = []
+    actors = [ACTOR_PRIMARY, ACTOR_FALLBACK]
+    final_run_result = None
+    for actor in actors:
+        # Build actor-specific input schema
+        if actor == ACTOR_PRIMARY:
+            input_data = {
+                "startUrls": [{"url": u} for u in movers_urls],
+                "maxItems": 1 if test_mode else max_items,
+                "proxyConfiguration": {"useApifyProxy": True},
+                "captchaSolver": True,
+                "scrapeProductDetails": False,
+            }
+        else:
+            input_data = {
+                "categoryOrProductUrls": movers_urls,
+                "maxItems": 1 if test_mode else max_items,
+                "proxyConfiguration": {"useApifyProxy": True},
+                "captchaSolver": True,
+                "scrapeProductDetails": False,
+            }
 
-    # Run Apify actor
-    res = run_apify_actor(api_token, input_data)
-    if isinstance(res, dict) and res.get("error"):
-        return res
+        run_result = _run_actor_once(api_token, actor, input_data)
+        attempts.append(run_result)
+        if run_result.get("ok"):
+            final_run_result = run_result
+            break
+        # If 404 / actor-not-found, try next; otherwise stop with error
+        http_status = run_result.get("http_status")
+        if http_status == 404:
+            # try next actor
+            continue
+        # If other error, exit early and return structured error with attempts
+        return {"error": True, "message": run_result.get("message"), "run_url": run_result.get("run_url"), "attempts": attempts}
 
-    # Expecting list of items
-    raw_items: List[Dict[str, Any]] = res if isinstance(res, list) else []
+    if not final_run_result:
+        # all attempts failed
+        return {"error": True, "message": "All actor attempts failed", "attempts": attempts}
+
+    raw_items: List[Dict[str, Any]] = final_run_result.get("items") or []
 
     cleaned: List[Dict[str, Any]] = []
     filtered_out = 0

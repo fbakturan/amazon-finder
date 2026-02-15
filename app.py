@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import json
 from typing import List
 from scraper import scrape_movers_and_shakers
 
@@ -35,6 +36,9 @@ if cols[1].button("Test Connection"):
             if res.get("run_url"):
                 run_url = res.get("run_url")
                 st.markdown(f"**Apify Run URL:** [{run_url}]({run_url})")
+            if res.get("attempts"):
+                st.markdown("**Actor Attempts (raw):**")
+                st.code(json.dumps(res.get("attempts"), indent=2, ensure_ascii=False))
         else:
             items = res.get("items") if isinstance(res, dict) else res
             st.success(f"Bağlantı başarılı — {len(items)} ürün örneği alındı.")
@@ -48,10 +52,13 @@ if st.button("Scrape"):
         # Error handling
         if isinstance(res, dict) and res.get("error"):
             st.error("🚨 Apify çağrısı başarısız oldu.")
-            st.code(res.get("message", "Bilinmeyen hata"))
-            if res.get("run_url"):
-                run_url = res.get("run_url")
-                st.markdown(f"**Apify Run URL:** [{run_url}]({run_url})")
+                st.code(res.get("message", "Bilinmeyen hata"))
+                if res.get("run_url"):
+                    run_url = res.get("run_url")
+                    st.markdown(f"**Apify Run URL:** [{run_url}]({run_url})")
+                if res.get("attempts"):
+                    st.markdown("**Actor Attempts (raw):**")
+                    st.code(json.dumps(res.get("attempts"), indent=2, ensure_ascii=False))
         else:
             data = res if isinstance(res, dict) else {"items": res, "metrics": {}}
             items: List[dict] = data.get("items", [])
