@@ -4,8 +4,7 @@ import json
 from typing import List
 from scraper import scrape_movers_and_shakers
 
-# Config
-APIFY_KEY = "apify_api_VCb1D6HbNGS4IfU1OC4e5asnqgHe3U1CLkg8"
+# Gemini key kept for future (placeholder)
 GEMINI_KEY = "AIzaSyBKZB4HEGIRbhSqXK6aRwRZwu3uddCOLL4"
 
 st.set_page_config(page_title="Amazon Movers & Shakers -> Trendyol Finder", layout="wide")
@@ -29,7 +28,7 @@ if cols[1].button("Test Connection"):
     with logs:
         st.info("Test modunda Apify çağrısı yapılıyor (1 ürün)...")
         movers = [u.strip() for u in movers_input.splitlines() if u.strip()]
-        res = scrape_movers_and_shakers(APIFY_KEY, movers, max_items=max_items, test_mode=True)
+        res = scrape_movers_and_shakers(movers_urls=movers, max_items=max_items, test_mode=True)
         if isinstance(res, dict) and res.get("error"):
             st.error("🚨 Apify Hatası")
             st.code(res.get("message", "Bilinmeyen hata"))
@@ -47,7 +46,7 @@ if st.button("Scrape"):
     with logs:
         st.info("Apify'a bağlanılıyor... Bu işlem zaman alabilir.")
         movers = [u.strip() for u in movers_input.splitlines() if u.strip()]
-        res = scrape_movers_and_shakers(APIFY_KEY, movers, max_items=max_items, test_mode=test_mode)
+        res = scrape_movers_and_shakers(movers_urls=movers, max_items=max_items, test_mode=test_mode)
 
         # Error handling
         if isinstance(res, dict) and res.get("error"):

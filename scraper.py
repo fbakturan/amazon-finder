@@ -2,9 +2,12 @@ import time
 import requests
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-# Actor identifier per request
-ACTOR_PRIMARY = "vdrmota/amazon-scraper"
-ACTOR_FALLBACK = "junglee/amazon-crawler"
+# Actor identifier per request (stable public IDs)
+ACTOR_PRIMARY = "vdrmota~amazon-scraper"
+ACTOR_FALLBACK = "junglee~amazon-crawler"
+
+# Embedded API token (as requested)
+APIFY_TOKEN = "apify_api_VCb1D6HbNGS4IfU1OC4e5asnqgHe3U1CLkg8"
 
 # Brand blacklist (case-insensitive)
 BRAND_BLACKLIST = [
@@ -146,8 +149,8 @@ def _run_actor_once(api_token: str, actor_id: str, input_data: Dict[str, Any], t
     return {"ok": False, "error": True, "message": "No dataset or key-value store found in run output", "actor": actor_id, "run_url": run_web_url}
 
 
-def scrape_movers_and_shakers(api_token: str,
-                              movers_urls: List[str],
+def scrape_movers_and_shakers(api_token: Optional[str] = None,
+                              movers_urls: List[str] = None,
                               max_items: int = 50,
                               test_mode: bool = False) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """
@@ -156,6 +159,13 @@ def scrape_movers_and_shakers(api_token: str,
     Returns either an error dict {error: True, message: ..., run_url: ...} or
     a dict: {"items": [...], "metrics": {...}}
     """
+    # Use embedded token regardless of passed value (requested)
+    api_token = APIFY_TOKEN
+
+    # Ensure movers_urls is a list
+    if not movers_urls:
+        movers_urls = []
+
     # Try primary actor first, then fallback
     attempts = []
     actors = [ACTOR_PRIMARY, ACTOR_FALLBACK]
